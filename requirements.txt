@@ -1,3 +1,6 @@
 pinecone
 streamlit
 numpy
+networkx
+pyvis 
+matplotlib
