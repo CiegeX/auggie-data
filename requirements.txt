@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 pinecone
 streamlit
 numpy
@@ -6,14 +5,5 @@ networkx
 pyvis 
 matplotlib
 uuid
-=======
-pinecone
-streamlit
-numpy
-networkx
-pyvis 
-matplotlib
-uuid
->>>>>>> 392c28ecbf569ca39603abd3323f1ada5d89fc47
 transformers
 pytorch 
