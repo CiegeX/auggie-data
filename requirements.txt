@@ -6,4 +6,4 @@ pyvis
 matplotlib
 uuid
 transformers
-pytorch 
+torch 
