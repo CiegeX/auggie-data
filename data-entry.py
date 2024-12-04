@@ -1,141 +1,187 @@
+import json
 import streamlit as st
 from pinecone import Pinecone
-import networkx as nx
-import matplotlib.pyplot as plt
-from pyvis.network import Network
-from transformers import pipeline
-import uuid 
+from openai import OpenAI
+import uuid
 
-# Initialize Pinecone
-pineconev=st.secrets["pinecone_api"]
+# Initialize Pinecone and OpenAI
+pineconev = st.secrets["pinecone_api"]
 pc = Pinecone(pineconev)
+client = OpenAI(api_key=st.secrets["openai_api"])
 
 # Create or connect to an index
-index_name = "auggie"
-index =pc.Index("auggie")
+index_name = "auggie-transcripts"
+index = pc.Index(index_name)
 
-# Create Pipeline for preprocessing text
-pipe = pipeline("token-classification", model="blaze999/Medical-NER")
+# Ensure session state for storing response_data
+if 'response_data' not in st.session_state:
+    st.session_state['response_data'] = []
+if "selected_entities" not in st.session_state: 
+    st.session_state["selected_entities"] = []
+st.title('Auggie Data Entry')
 
-# Ensure session state initialization
-if 'entities' not in st.session_state:
-    st.session_state.entities = []
-if 'selected_entities' not in st.session_state:
-    st.session_state.selected_entities = []
+def get_response(message):
+    response = client.chat.completions.create(
+        model="gpt-4o-2024-08-06",
+        messages=[
+            {
+                "role": "system",
+                "content": """1. given medical notes, we want to break them up into a directed graph
+2.1 if the note itself has an acronym for an entity then use it to name the entity but do not invent your own
+2.2 the longer name or names can be added as `synonyms` property to the entity
+2.3 when deciding the name for an Entity don't break multiple words down to the point that they lose their meaning for example don't shorten calcium gluconate to just calcium on your own
+2.4 anything that looks like a definition or meaning or purpose or explanation should become part of the `details` property for an Entity. Don't add extra context if not from text.
+2.6.1 prioritize conforming to the following relationship names whenever possible: "IS_TREATED_WITH", "IS_ASSOCIATED_WITH", "HAS_SIGN", "IS_SIGN_OF", "HAS_SYMPTOM", "IS_SYMPTOM_OF", "IS_SIGN_OF", "HAS_COMPLICATION", "IS_TRIGGERED_BY", "TRIGGERS", "HAS_MNEMONIC", "HAS_RISK_FACTOR", "IS_RISK_FACTOR_FOR", "CAN_BE_SCORED_USING"
+2.6.3 if either or these relationships is created then the counterpart should be created as well: "HAS_SIGN", "IS_SIGN_OF"
+2.6.3 if either or these relationships is created then the counterpart should be created as well: "HAS_SYMPTOM", "IS_SYMPTOM_OF"
+2.6.4 if the theme or idea or meaning or gist of the relationship in the note doesn't match any of the above suggested ones then use whatever new relationship name you best see fit
+2.7 we want to show an entity and its synonyms that will be created as a property of that entity
+2.8 If entities are implied but not explicitly described (e.g., 'signs and symptoms' without details) then don't try to process it because its missing data
+3. we also want to display pinecone upsert that goes with each of the pieces mentioned in #2
+4. escape apostrophes in field values
+7. The output MUST be in JSON where it can look like { markup: [ {markup: human readable, pineConeUpserts: [actual upsert]} ] } but please format it nicely with indentations
+8. when defining a relationship the id must match source name
+                {
+                    "markup": [
+                        {
+                            "id": "Behcet",
+                            "values": {
+                                "name": "Behcet",
+                                "synonyms": ["Behçet"],
+                                "details": "A condition associated with painful genital ulcers, vasculitis, aphthous ulcers, and uveitis. It does not include fever or erythema nodosum."
+                                "relationship": ["HAS_SYMPTOM", "HAS_SYMPTOM"],
+                                "target": ["Genital Ulcers", "Uveitis"]
+                            }
+                        },
+                        {
+                            "id": "Genital Ulcers",
+                            "values": {
+                                "name": "Genital Ulcers",
+                                "synonyms": ["Painful genital ulcers"],
+                                "details": "Painful sores in the genital region, characteristic of Behcet disease."
+                                "relationship": "IS_SYMPTOM_OF",
+                                "target": "Behcet"
+                            }
+                        },
+                        {
+                            "id": "Uveitis",
+                            "values": {
+                                "name": "Uveitis",
+                                "synonyms": [],
+                                "details": "Inflammation of the uvea, often associated with Behcet disease."
+                                "relationship": "IS_SYMPTOM_OF",
+                                "target": "Behcet"
+                            }
+                        }
+                    ]
+                }
+                """
+            },
+            {
+                "role": "user",
+                "content": message
+            }
+        ]
+    )
+    response_content = response.choices[0].message.content.strip()
 
-# Streamlit app interface
-st.title("Auggie Data Entry")
-st.write("Allows data to be uploaded into Auggie Vector Database")
+    # Log response content for debugging
+    st.write(f"Raw Response Content: {response_content}")  # Debugging line to print raw response content
 
-with st.form(key="form", clear_on_submit=True):
-    st.subheader("Author Notes")
-    author_notes = st.text_area("Enter Notes here")
-    submit_button = st.form_submit_button(label="Submit")
+    if not response_content:
+        st.error("Error: The response content is empty.")
+        return ""
 
-def merge_entities(entities):
-    merged_entities = []
-    current_entity = None
-    current_text = []
+    # Remove the backticks and "json" label if present
+    if response_content.startswith("```json") and response_content.endswith("```"):
+        response_content = response_content[7:-3].strip()
 
-    for entity in entities:
-        entity_type = entity['entity']
-        text = entity['word'].replace("▁", "").strip()
+    # Properly escape single quotes
+    response_content = response_content.replace("\\'", "'")
 
-        if entity_type.startswith('B-'):
-            if current_entity and current_text:
-                merged_entities.append({"entity": current_entity, "text": " ".join(current_text)})
-            current_entity = entity_type[2:]
-            current_text = [text]
-        elif entity_type.startswith('I-') and current_entity:
-            current_text.append(text)
+    # Log cleaned response content for debugging
+    st.write(f"Cleaned Response Content: {response_content}")  # Debugging line to print cleaned response content
+
+    try:
+        response_json = json.loads(response_content)  # Convert string to JSON
+        st.write(f"Parsed JSON: {response_json}")  # Debugging line to print parsed JSON
+
+        # Extract data from 'markup' and flatten the structure
+        pine_cone_upserts = []
+        if 'markup' in response_json:
+            for entry in response_json['markup']:
+                if 'id' in entry and 'values' in entry:
+                    pine_cone_upserts.append(entry)
+                else:
+                    st.error("Error: 'id' or 'values' key not found in entry.")
         else:
-            if current_entity and current_text:
-                merged_entities.append({"entity": current_entity, "text": " ".join(current_text)})
-            current_entity = None
-            current_text = []
+            st.error("Error: 'markup' key not found in JSON response.")
+            return "Error: 'markup' key not found."
 
-    if current_entity and current_text:
-        merged_entities.append({"entity": current_entity, "text": " ".join(current_text)})
+        st.session_state['response_data'].extend(pine_cone_upserts)
+    except json.JSONDecodeError as e:
+        st.error(f"JSONDecodeError: {e}")
+        st.error(f"Response Content for Debugging: {response_content}")
+        return f"Error: Invalid JSON response. Details: {str(e)}"
 
-    return merged_entities
+    return response_content
 
-# Check if the form is submitted
-if submit_button and author_notes:
-    # Use the transformer pipeline to analyze the input
-    results = pipe(author_notes)
+# Input for user message
+input_placeholder = st.empty()
+message = input_placeholder.text_input("You: ", key="chat_input")
 
-    # Extract and merge entities from the results
-    entities = merge_entities(results)
+if st.button("Send", key="send_button"):
+    if message:
+        response_content = get_response(message)
+        if response_content and "Error:" not in response_content:  # Only append if the response is not empty and valid
+            st.rerun()  # Re-run the script to update the checkboxes
 
-    # Store the entities in session state
-    st.session_state.entities = entities
+# Display the response data with checkboxes
+st.write(f"Session State Response Data: {st.session_state['response_data']}")  # Debugging line to print response data
+for i, item in enumerate(st.session_state['response_data']):
+    if isinstance(item, dict):  # Ensure the item is a dictionary
+        entity = item.get('values', {}).get('name', 'Unknown Entity')
+        relationships = ", ".join([f"{relation['relationship']} with {relation['target']}" for relation in item.get('values', {}).get('relationships', []) if 'relationship' in relation and 'target' in relation])
+        checkbox_label = f"{item['id']} - {item['values']}"
+        if st.checkbox(checkbox_label, key=f"item_{i}"):
+            if item not in st.session_state.selected_entities:
+                st.session_state.selected_entities.append(item)    
+        else:
+            if item in st.session_state.selected_entities:
+                st.session_state.selected_entities.remove(item)
 
-# Display the results in a scrollable expander
-if st.session_state.entities:
-    with st.expander("Extracted Entities"):
-        for i, entity in enumerate(st.session_state.entities):
-            checkbox_label = f"Relationship: {entity['entity']}, Node: {entity['text']}"
-            checkbox_key = f"entity_{i}"
-            checkbox_value = entity in st.session_state.selected_entities
-
-            if st.checkbox(checkbox_label, key=checkbox_key, value=checkbox_value):
-                if entity not in st.session_state.selected_entities:
-                    st.session_state.selected_entities.append(entity)
-            else:
-                if entity in st.session_state.selected_entities:
-                    st.session_state.selected_entities.remove(entity)
+# Display the selected entities
+st.write("Selected entities:")
+for entity in st.session_state.selected_entities:
+    if isinstance(entity, dict):
+        st.write(f"ID: {entity.get('id', 'Unknown ID')}")
 
 # Button to upload selected entities
 if st.button("Upload to Pinecone") and st.session_state.selected_entities:
-    combined_text = ', '.join([d["text"] for d in st.session_state.selected_entities])
+    for entity in st.session_state.selected_entities:
+        if isinstance(entity, dict):
+            entity_id = entity.get('id', str(uuid.uuid4()))  # Use entity ID or generate a unique one
+            entity_text = entity.get("values", {}).get("name", "Unknown Entity")
+            
+            # Get embedding
+            embeddings_response = pc.inference.embed(
+                model='multilingual-e5-large',
+                inputs=[entity_text],
+                parameters={"input_type": "passage", "truncate": "END"}
+            )
+            embedding = embeddings_response[0]['values']
 
-    if isinstance(combined_text, str):
-        # Check for a disease_disorder entity to use as the ID
-        disease_entity = next((d["text"] for d in st.session_state.selected_entities if d["entity"] == "DISEASE_DISORDER"), None)
+            # Prepare metadata
+            metadata = {
+                "source": entity.get("values", {}).get("source", ""),
+                "target": entity.get("values", {}).get("target", ""),
+                "relationship": entity.get("values", {}).get("relationship", ""),
+                "details": entity.get("values", {}).get("details", ""),
+                "synonyms": entity.get("values", {}).get("synonyms", [])
+            }
 
-        # Use the disease entity as the ID if available, otherwise generate a unique ID
-        unique_id = disease_entity if disease_entity else str(uuid.uuid4())
-
-        # Convert combined text to a single vector using an embedding model
-        embeddings_response = pc.inference.embed(
-            model='multilingual-e5-large',
-            inputs=[combined_text],
-            parameters={"input_type": "passage", "truncate": "END"}
-        )
-        combined_embedding = embeddings_response[0]['values']
-
-        try:
-            # Retrieve existing metadata if it exists
-            fetch_response = index.fetch(ids=[unique_id], namespace="case-study")
-            existing_metadata = fetch_response['vectors'].get(unique_id, {}).get('metadata', {})
-        except KeyError:
-            existing_metadata = {}
-         # Ensure relationships and conditions are correctly paired and ordered 
-        existing_conditions = existing_metadata.get("associated conditions", "").split(", ") if existing_metadata.get("associated conditions", "") else [] 
-        existing_relationships = existing_metadata.get("relationships", "").split(", ") if existing_metadata.get("relationships", "") else [] 
-        new_relationships_conditions = [(d["entity"], d["text"]) for d in st.session_state.selected_entities if d["text"] not in existing_conditions] 
-        updated_relationships_conditions = list(zip(existing_relationships, existing_conditions)) + new_relationships_conditions
-        # Convert to single strings maintaining order 
-        relationships = ', '.join([pair[0] for pair in updated_relationships_conditions]) 
-        conditions = ', '.join([pair[1] for pair in updated_relationships_conditions])
-        
-        updated_metadata = { 
-            "relationships": relationships, 
-            "associated conditions": conditions 
-        }
-        
-        # Upsert the combined vector with updated metadata to Pinecone
-        index.upsert([
-            (unique_id, combined_embedding, updated_metadata)
-        ], namespace="case-study")
-
-        st.write("Combined vector uploaded to Pinecone successfully!")
-        st.session_state.selected_entities = []
-    else:
-        st.write("Error: Combined text is not in the correct format")
-
-# Display the currently selected entities
-st.write("Selected entities:")
-for entity in st.session_state.selected_entities:
-    st.write(f"Entity: {entity['entity']}, Text: {entity['text']}")
-
+            # Upsert into Pinecone
+            index.upsert([(entity_id, embedding, metadata)], namespace="test")
+            
+    st.write("Selected entities uploaded to Pinecone successfully!")
+    st.session_state.selected_entities = []
