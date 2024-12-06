@@ -30,13 +30,11 @@ def get_response(message):
 2.1 if the note itself has an acronym for an entity then use it to name the entity but do not invent your own
 2.2 the longer name or names can be added as `synonyms` property to the entity
 2.3 when deciding the name for an Entity don't break multiple words down to the point that they lose their meaning for example don't shorten calcium gluconate to just calcium on your own
-2.4 anything that looks like a definition or meaning or purpose or explanation should become part of the `details` property for an Entity. Don't add extra context if not from text.
+2.4 anything that looks like a definition or meaning or purpose or explanation should become part of the `details` property for an Entity. Don't add extra context if not from text!
 2.6.1 prioritize conforming to the following relationship names whenever possible: "IS_TREATED_WITH", "IS_ASSOCIATED_WITH", "HAS_SIGN", "IS_SIGN_OF", "HAS_SYMPTOM", "IS_SYMPTOM_OF", "IS_SIGN_OF", "HAS_COMPLICATION", "IS_TRIGGERED_BY", "TRIGGERS", "HAS_MNEMONIC", "HAS_RISK_FACTOR", "IS_RISK_FACTOR_FOR", "CAN_BE_SCORED_USING"
-2.6.3 if either or these relationships is created then the counterpart should be created as well: "HAS_SIGN", "IS_SIGN_OF"
-2.6.3 if either or these relationships is created then the counterpart should be created as well: "HAS_SYMPTOM", "IS_SYMPTOM_OF"
 2.6.4 if the theme or idea or meaning or gist of the relationship in the note doesn't match any of the above suggested ones then use whatever new relationship name you best see fit
 2.7 we want to show an entity and its synonyms that will be created as a property of that entity
-2.8 If entities are implied but not explicitly described (e.g., 'signs and symptoms' without details) then don't try to process it because its missing data
+2.8 If entities are implied but not explicitly described (e.g., 'signs and symptoms' without details) then don't try to process it because its missing data! 
 3. we also want to display pinecone upsert that goes with each of the pieces mentioned in #2
 4. escape apostrophes in field values
 7. The output MUST be in JSON where it can look like { markup: [ {markup: human readable, pineConeUpserts: [actual upsert]} ] } but please format it nicely with indentations
@@ -60,7 +58,7 @@ def get_response(message):
                                 "synonyms": ["Painful genital ulcers"],
                                 "details": "Painful sores in the genital region, characteristic of Behcet disease."
                                 "relationship": "IS_SYMPTOM_OF",
-                                "target": "Behcet"
+                                "source": "Behcet"
                             }
                         },
                         {
@@ -70,7 +68,7 @@ def get_response(message):
                                 "synonyms": [],
                                 "details": "Inflammation of the uvea, often associated with Behcet disease."
                                 "relationship": "IS_SYMPTOM_OF",
-                                "target": "Behcet"
+                                "source": "Behcet"
                             }
                         }
                     ]
@@ -137,12 +135,12 @@ if st.button("Send", key="send_button"):
             st.rerun()  # Re-run the script to update the checkboxes
 
 # Display the response data with checkboxes
-st.write(f"Session State Response Data: {st.session_state['response_data']}")  # Debugging line to print response data
+#st.write(f"Session State Response Data: {st.session_state['response_data']}")  # Debugging line to print response data
 for i, item in enumerate(st.session_state['response_data']):
     if isinstance(item, dict):  # Ensure the item is a dictionary
         entity = item.get('values', {}).get('name', 'Unknown Entity')
         relationships = ", ".join([f"{relation['relationship']} with {relation['target']}" for relation in item.get('values', {}).get('relationships', []) if 'relationship' in relation and 'target' in relation])
-        checkbox_label = f"{item['id']} - {item['values']}"
+        checkbox_label = f":green[Node: {item['id']}]  \n :blue[Edge: {item['values'].get('relationship')}]  \n :green[Source:  {item['values'].get('source')}]  \n :green[Target: {item['values'].get('target')}]  \n Details: {item['values'].get('details')}"
         if st.checkbox(checkbox_label, key=f"item_{i}"):
             if item not in st.session_state.selected_entities:
                 st.session_state.selected_entities.append(item)    
@@ -185,3 +183,40 @@ if st.button("Upload to Pinecone") and st.session_state.selected_entities:
             
     st.write("Selected entities uploaded to Pinecone successfully!")
     st.session_state.selected_entities = []
+
+st.title("Query")
+
+
+# Create a form for query input
+with st.form(key="query"):
+    query_text = st.text_input("Enter your query")
+    query_button = st.form_submit_button(label="Submit")
+
+# Check if the form is submitted
+if query_button:
+    # Perform embedding for the query
+    query_embedding_response = pc.inference.embed(
+        model="multilingual-e5-large",
+        inputs=[query_text],
+        parameters={"input_type": "query", "truncate": "END"}
+    )
+    
+ # Print the embeddings response to check its structure 
+    #st.write("Query embedding response:", query_embedding_response)
+
+    # Extract the query embedding
+    query_embedding = query_embedding_response[0].values
+    
+    # Query Pinecone
+    documents = index.query(
+        namespace='test',
+        vector=query_embedding,
+        top_k=4,
+        include_values=False,
+        include_metadata=False,
+    )
+
+    #st.write("Retrieved documents:", documents)
+
+    for doc in documents["matches"]:
+        st.write(f"{doc['id']} with a score of : {doc['score']}")
